@@ -3,14 +3,20 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <gsl/gsl_vector.h>
+#include <gsl/gsl_matrix.h>
 #include <gsl/gsl_integration.h>
+#include <gsl/gsl_multifit.h>
 
 #include "simul.h"
 #include "stats.h"
-#include "voter_behavior.h"
+// #include "voter_behavior.h"
 
 #define LEFT  'l'
 #define RIGHT 'r'
+
+#define EXTREME_LEFT -1.0
+#define EXTREME_RIGHT 1.0
+
 #define BETA_L_STAR 3.5
 #define BETA_R_STAR 2.5
 
@@ -21,183 +27,190 @@
 #define MU 0.0
 #define NU 6
 
-double mk_out(double eps, int plc, double beta_l_star, double beta_r_star) {
+#define USE_POLYNOMIAL_REG 1
 
-	/* Initialize policy flags and economic outcome. */
-	static char left = LEFT;
+
+double mk_out(double eps, double plc, double beta_l_star, double beta_r_star) {
 	double out = 0;
-	
-	/* Economic outcome is parameter corresponding to implemented policy
-	 * plus normal shock.
-	 */
-	if (plc == left) {
-		out = beta_l_star + eps;
-	} else {
-		out = beta_r_star + eps;
-	}
+	// We are going to interpolate for now between the beta_l_star and beta_r_star
+	const double ext_left = EXTREME_LEFT;
+	const double ext_right = EXTREME_RIGHT;
 
+	double delta_beta = 0;
+	double delta_policy_val = 0;
+	double intercept = 0;
+	double slope = 0;
+
+	#if USE_POLYNOMIAL_REG
+//     	A polynomial with a max at around -0.5
+		out = 2 + (-2/3) * plc + (-0.6) * plc * plc + eps;
+	#else
+		delta_policy_val = ext_right - ext_left;
+		delta_beta = beta_r_star - beta_l_star;
+		slope = delta_beta / delta_policy_val;
+		intercept = beta_l_star + (delta_policy_val / 2) * slope;
+		out = slope * plc + intercept + eps;
+		//printf("out = %f, slope = %f, plc = %f, intercept = %f, eps = %f\n", out, slope, plc, intercept, eps);
+	#endif
 	return out;
 }
 
-struct polity_state mk_plt(double e_diff, double zeta, double alpha) {
+/*
+ * Solve: min_p [(p - opt_voter_p)^2 + lambda * (p - I)^2]
+ * Analytic solution: p* = (opt_voter_p + lambda * I) / (1 + lambda), clamped to [-1,1]
+ */
+double choose_position(double opt_voter_p, double I, double lambda) {
+    double p = (opt_voter_p + lambda * I) / (1.0 + lambda);
+    if (p < -1.0) p = -1.0;
+    if (p > +1.0) p = +1.0;
+    return p;
+}
 
-	/* Initialize policy flags. */
-	static const char left = LEFT;
-	static const char right = RIGHT;
+struct polity_state mk_plt(double opt_voter_p, double zeta, double alpha, double lambda) {
+	/* party ideals */
+	const double ideal_l = -1.0;
+	const double ideal_r = +1.0;
 	
-	/* Initialize electoral threshold. */
-	const double rho = (1 / (2 * zeta * (1 + alpha)));
+    /* compute each party's optimal platform p_l, p_r */
+    double p_l = choose_position(opt_voter_p, ideal_l, lambda);
+    double p_r = choose_position(opt_voter_p, ideal_r, lambda);
+
+	/* median voter belief = opt_voter_p */
+    /* determine winner: which platform is numerically closer to median belief */
+    double d_l = fabs(p_l - opt_voter_p);
+    double d_r = fabs(p_r - opt_voter_p);
 	
-	/* Initialize winning probability for `l` in case of indifference. */
-	const double p_win_l = 1/2 + zeta * e_diff;
-
-	/* Initialize polity state. */
-	struct polity_state plt;
-	plt = (polity_state) {'u', true};
-
-	/* Run elections. In first case left wins, with consensus. In second
-	 * case right wins, with consensus. In third case polarization occurs,
-	 * and winning policy is stochastic, depends on voters' preference
-	 * shock phi.
-	 */
-	if (e_diff > rho) {
-		plt.plc = left;
-		plt.plz = false;
-	} else if (-e_diff > rho) {
-		plt.plc = right;
-		plt.plz = false;
-	} else {
-		/* Polarization occurs, i.e. `L` offers `l` and `R` offers `r`.
-		 * Left wins with probability `p_win_l`. To determine electoral
-		 * outcome, draw u from U[0,1], and assign victory to `L` iff
-		 * u <= p_win_l, since F(u) = u.
-		 */
-		double u = get_uniform_draw();
-		if (u <= p_win_l) {
-			plt.plc = left;
-		} else {
-			plt.plc = right;
-		}
-		plt.plz = true;
+	bool left_wins;
+	if (d_l < d_r) {             
+		left_wins = true;
+	} else if (d_r < d_l) {         
+		left_wins = false;
+	} else {                        
+		left_wins = (get_uniform_draw() < 0.5);
 	}
 
+	struct polity_state plt;
+	plt.plc      = left_wins ? p_l : p_r;
+	plt.winner_l = left_wins;
+	plt.plz      = fabs(p_l - p_r); /* polarization measure */
 	return plt;
 }
 
-struct history mk_hist(int K, double sig, size_t T) {
-	
-	/* Set model parameters. */
-	double mu = MU;
-	double zeta = ZETA;
-	double alpha = ALPHA;
-	double nu = NU;
-	static const double beta_l_star = BETA_L_STAR;
-	static const double beta_r_star = BETA_R_STAR;
+/* compute optimal policy from quadratic coefficients */
+static double optimal_policy(double B1, double B2) {
+    if (fabs(B2) < 1e-12)            /* nearly flat */
+        return (B1 < 0.0 ?  -1.0 : 1.0);
+    double p = B1 / (2.0 * B2);
+    if (p < -1.0) p = -1.0;
+    if (p >  1.0) p =  1.0;
+    return p;
+}
 
-	/* Initialize history vectors*/
-	gsl_vector* e_diff_hist = gsl_vector_calloc(T);
-	gsl_vector_char* plc_hist = gsl_vector_char_calloc(T);
-	gsl_vector_uint* plz_hist = gsl_vector_uint_calloc(T);
-	gsl_vector* eps_hist = gsl_vector_calloc(T);
-	gsl_vector* out_hist = gsl_vector_calloc(T);
 
-	/* Initialize and draw history of shocks. Since working with pairs of
-	 * RVs, draw up to second last period.
-	 */
-	for (size_t t = 0; t < T - 1; t+= 2) {
-		struct normal_pair normal_pair;
-		normal_pair = get_normal_pair(mu, sig);
-		gsl_vector_set(eps_hist, t, normal_pair.z_1);
-		gsl_vector_set(eps_hist, t+1, normal_pair.z_2);
+
+struct history mk_hist(int K, double sig, size_t T, double lambda) {
+	/* ---- model parameters ---- */
+	const double mu   = MU;
+	const double zeta = ZETA;
+	const double alpha= ALPHA;
+	const double beta_l_star = BETA_L_STAR;
+	const double beta_r_star = BETA_R_STAR;
+
+	/* ---- storage ---- */
+	gsl_vector *opt_voter_p_hist   = gsl_vector_calloc(T);      
+	gsl_vector *plc_hist = gsl_vector_calloc(T);       /* implemented platform */
+	gsl_vector *plz_hist = gsl_vector_calloc(T); /* winner flag */
+	gsl_vector *eps_hist = gsl_vector_calloc(T);       /* iid shocks */
+	gsl_vector *out_hist = gsl_vector_calloc(T);       /* realized outcomes */
+
+	/* pre‑draw shocks */
+	for (size_t t=0; t<T-1; t+=2) {
+		struct normal_pair z = get_normal_pair(mu, sig);
+		gsl_vector_set(eps_hist, t,   z.z_1);
+		gsl_vector_set(eps_hist, t+1, z.z_2);
 	}
-	
-	/* Initialize observed policy and outcome histories as views on full
-	 * policy and outcome histories. Observed histories increase in length
-	 * when simulating, until length K is reached. At that point vector
-	 * views start shifting and have fixed length K.
-	 */
+	/* rolling views */
 	gsl_vector_view out_obs_h;
-	gsl_vector_char_view plc_obs_h;
-	size_t h_size = 1;
-
-	/* Initialization of e_diff = 0 at t=0 implies polity status
-	 * is determined by coin toss in that period. After that, use
-	 * observed histories to calculate posterior.
-	 */
-	double e_diff = 0.0;
-	double out = 0.0;
-	double eps = 0.0;
-	struct polity_state plt;
-
-	/* Set up struct containing model parameters and integration workspace
-	 * to calculate posterior.
-	 */
-	size_t subint = SUBINT_PARTITION_CARDINALITY;
-	gsl_integration_workspace* giw = gsl_integration_workspace_alloc(subint);
-	igr_params igr_p = {.subint=subint, .mu=mu, .sig=sig, .nu=nu,
-			    .h_size=h_size, .giw=giw};
-
-
-	for (size_t t = 0; t < T; t++) {
-
-		/* Calculate posterior difference between beta_l and beta_r,
-		 * using observed policy and outcome histories.
-		 */
-		if (t > 0) {
-			igr_p.out_obs_h = &out_obs_h.vector;
-			igr_p.plc_obs_h = &plc_obs_h.vector;
-			e_diff = clc_e_diff(igr_p);
+	gsl_vector_view plc_obs_h;
+	size_t h_size = 1; /* grows to K */
+	for (size_t t=0; t<T; ++t) {
+		/* ---------- voters form belief via OLS y = B·p ---------- */
+		//double B1 = 0.0; /* default when no past data */
+		//double B2 = 0.0; /* default when no past data */
+		//double intercept = 0.0;
+		double opt_voter_p = 2 * get_uniform_draw() - 1.0;  /* random in [-1,1] */
+		if (t>0) {
+			if (h_size <= K) {
+				out_obs_h = gsl_vector_subvector(out_hist, 0, h_size);
+				plc_obs_h = gsl_vector_subvector(plc_hist, 0, h_size);
+			} else {
+				out_obs_h = gsl_vector_subvector(out_hist, t-K, K);
+				plc_obs_h = gsl_vector_subvector(plc_hist, t-K, K);
+			}
+			
+			size_t n = out_obs_h.vector.size;
+			#if USE_POLYNOMIAL_REG
+				const size_t p = 3;
+			#else
+				const size_t p = 2;
+			#endif
+			if (n>=p) {
+				//const size_t p = 1;                        /* # regressors */
+				gsl_matrix *X = gsl_matrix_alloc(n, p);
+				gsl_vector *y = gsl_vector_alloc(n);
+				for (size_t i = 0; i < n; ++i) {
+					double pval = gsl_vector_get(&plc_obs_h.vector, i);
+					double oval = gsl_vector_get(&out_obs_h.vector, i);
+					gsl_matrix_set(X, i, 0, 1.0);    /* intercept */
+					gsl_matrix_set(X, i, 1, pval);   /* p     */
+					#if USE_POLYNOMIAL_REG
+						gsl_matrix_set(X, i, 2, pval*pval); /* p^2     */
+					#endif
+					gsl_vector_set(y,     i, oval);
+				}
+				
+				gsl_vector *coef = gsl_vector_alloc(p);
+				gsl_matrix *cov  = gsl_matrix_alloc(p, p);
+				double chisq;
+				gsl_multifit_linear_workspace *work = gsl_multifit_linear_alloc(n, p);
+				gsl_multifit_linear(X, y, coef, cov, &chisq, work);
+				double intercept = gsl_vector_get(coef, 0);
+				double B1 = gsl_vector_get(coef, 1);
+				#if USE_POLYNOMIAL_REG
+                	double B2 = gsl_vector_get(coef, 2);
+				#else
+					double B2 = 0.0;
+				#endif
+                opt_voter_p = optimal_policy(B1, B2);
+				//printf("slope = %f, intercept = %f\n", M, intercept);
+				gsl_multifit_linear_free(work);
+				gsl_matrix_free(X);
+				gsl_vector_free(y);
+				gsl_vector_free(coef);
+				gsl_matrix_free(cov);
+			}
 		}
 
-		/* Run elections given median voter's posterior */
-		plt = mk_plt(e_diff, zeta, alpha);
+		struct polity_state plt = mk_plt(opt_voter_p, zeta, alpha, lambda);
+		double eps = gsl_vector_get(eps_hist, t);
+		double out = mk_out(eps, plt.plc, beta_l_star, beta_r_star);	
 
-		/* Determine economic outcome, given shock and policy implemented
-		 * as result of electoral outcome.
-		 */
-		eps = gsl_vector_get(eps_hist, t);
-		out = mk_out(eps, plt.plc, beta_l_star, beta_r_star);
-
-		/* Store outcomes and posterior in vectors. */
-		gsl_vector_set(e_diff_hist, t, e_diff);
-		gsl_vector_char_set(plc_hist, t, plt.plc);
-		gsl_vector_uint_set(plz_hist, t, plt.plz);
+		/* store */
+		gsl_vector_set(opt_voter_p_hist, t, opt_voter_p);
+		gsl_vector_set(plc_hist, t, plt.plc);
+		gsl_vector_set(plz_hist, t, plt.plz);
 		gsl_vector_set(out_hist, t, out);
 
-		if (h_size <= K) {
-			/* Outcome and policy histories used for posterior
-			 * formation increase in length until length reaches
-			 * maximum memory length, i.e. K.
-			 */
-			out_obs_h = gsl_vector_subvector(out_hist, 0, h_size);
-			plc_obs_h = gsl_vector_char_subvector(plc_hist, 0,
-							      h_size);
-			/* Update integration parameter and increase length of
-			 * history
-			 */
-			igr_p.h_size = h_size;
-			h_size++;
-
-		} else {
-			/* When maximum length of observed histories is reached,
-			 * histories used to form posteriors are views on full
-			 * histories, whose starting point is an offset of the
-			 * current `t` of length K.
-			 */
-			out_obs_h = gsl_vector_subvector(out_hist, t - K + 1, K);
-			plc_obs_h = gsl_vector_char_subvector(plc_hist, t - K + 1, K);
-		}
-
+		if (h_size < K) h_size++;
 	}
 
-	/* Store histories. */
-	history history = {.e_diff_hist=e_diff_hist,
-			   .plc_hist=plc_hist,
-			   .plz_hist=plz_hist};
+	struct history hist = {
+		.e_diff_hist = opt_voter_p_hist,    /* keeping original field name */
+		.plc_hist    = plc_hist,
+		.plz_hist    = plz_hist
+	};
 
-	/* Clean up memory. */
 	gsl_vector_free(eps_hist);
-	gsl_integration_workspace_free(giw);
-
-	return history;
+	gsl_vector_free(out_hist);
+	return hist;
 }

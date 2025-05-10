@@ -6,13 +6,13 @@
 #include <gsl/gsl_integration.h>
 
 #include "stats.h"
-#include "voter_behavior.h"
+//#include "voter_behavior.h"
 #include "simul.h"
 #include "output.h"
 
 #define SEED 12131989
 
-void main_compstat(size_t N, size_t T) {
+void main_compstat(size_t N, size_t T, double lambda) {
 
 	/* Initialize arrays of parameter values for memory length of voters
 	 * and standard deviation of shocks to economic outcomes. Simulation
@@ -46,8 +46,8 @@ void main_compstat(size_t N, size_t T) {
 
 			/* Initialize matrices to contain simulation results */
 			gsl_matrix* e_diff_mat = gsl_matrix_calloc(N, T);
-			gsl_matrix_char* plc_mat = gsl_matrix_char_calloc(N, T);
-			gsl_matrix_uint* plz_mat = gsl_matrix_uint_calloc(N, T);
+			gsl_matrix* plc_mat    = gsl_matrix_calloc(N, T);
+			gsl_matrix* plz_mat    = gsl_matrix_calloc(N, T);
 
 			/* Run N simulations for each configuration of the
 			 * parameter space.
@@ -55,13 +55,10 @@ void main_compstat(size_t N, size_t T) {
 			for (size_t n = 0; n < N; n++) {
 				printf("\tSimulating history %zu\n", n);
 				struct history history;
-				history = mk_hist(mem_arr[k], sig_arr[s], T);
-				gsl_matrix_set_row(e_diff_mat, n,
-						   history.e_diff_hist);
-				gsl_matrix_char_set_row(plc_mat, n,
-							history.plc_hist);
-				gsl_matrix_uint_set_row(plz_mat, n,
-							history.plz_hist);
+				history = mk_hist(mem_arr[k], sig_arr[s], T, lambda);
+				gsl_matrix_set_row(e_diff_mat, n, history.e_diff_hist);
+                gsl_matrix_set_row(plc_mat, n, history.plc_hist);
+				gsl_matrix_set_row(plz_mat, n, history.plz_hist);
 
 			}
 
@@ -74,15 +71,15 @@ void main_compstat(size_t N, size_t T) {
 			
 			/* Free memory. */
 			gsl_matrix_free(e_diff_mat);
-			gsl_matrix_char_free(plc_mat);
-			gsl_matrix_uint_free(plz_mat);
+			gsl_matrix_free(plc_mat);
+			gsl_matrix_free(plz_mat);
 
 		}
 	}
 
 }
 
-void main_welfare(size_t N, size_t T) {
+void main_welfare(size_t N, size_t T, double lambda) {
 
 	/* Initialize arrays of parameter values for memory length of voters
 	 * and standard deviation of shocks to economic outcomes. Simulation
@@ -120,8 +117,8 @@ void main_welfare(size_t N, size_t T) {
 
 			/* Initialize matrices to contain simulation results */
 			gsl_matrix* e_diff_mat = gsl_matrix_calloc(N, T);
-			gsl_matrix_char* plc_mat = gsl_matrix_char_calloc(N, T);
-			gsl_matrix_uint* plz_mat = gsl_matrix_uint_calloc(N, T);
+			gsl_matrix* plc_mat = gsl_matrix_calloc(N, T);
+			gsl_matrix* plz_mat = gsl_matrix_calloc(N, T);
 
 			/* Run N simulations for each configuration of the
 			 * parameter space.
@@ -129,14 +126,10 @@ void main_welfare(size_t N, size_t T) {
 			for (size_t n = 0; n < N; n++) {
 				printf("\tSimulating history %zu\n", n);
 				struct history history;
-				history = mk_hist(mem_arr[k], sig_arr[s], T);
-				gsl_matrix_set_row(e_diff_mat, n,
-						   history.e_diff_hist);
-				gsl_matrix_char_set_row(plc_mat, n,
-							history.plc_hist);
-				gsl_matrix_uint_set_row(plz_mat, n,
-							history.plz_hist);
-
+				history = mk_hist(mem_arr[k], sig_arr[s], T, lambda);
+				gsl_matrix_set_row(e_diff_mat, n, history.e_diff_hist);
+				gsl_matrix_set_row(plc_mat, n, history.plc_hist);
+				gsl_matrix_set_row(plz_mat, n, history.plz_hist);
 			}
 
 			/* Write the N simulated history for each variable of
@@ -148,8 +141,8 @@ void main_welfare(size_t N, size_t T) {
 
 			/* Free memory. */
 			gsl_matrix_free(e_diff_mat);
-			gsl_matrix_char_free(plc_mat);
-			gsl_matrix_uint_free(plz_mat);
+			gsl_matrix_free(plc_mat);
+			gsl_matrix_free(plz_mat);
 
 			}
 	}
